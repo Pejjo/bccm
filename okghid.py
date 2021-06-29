@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 #
@@ -6,9 +6,8 @@
 Handling raw data inputs example
 """
 from time import sleep
-from msvcrt import kbhit
 
-import pywinusb.hid as hid
+import easyhid as hid
 
 import ctypes
 
@@ -16,6 +15,10 @@ import datetime
 import sys
 import getopt
 import paho.mqtt.client as mqtt
+import socket
+import fcntl
+import struct
+import traceback
 
 c_uint8 = ctypes.c_uint8
 
@@ -29,23 +32,22 @@ gUte=0
 def print_string(hid, dta):
   # Send string to display
 
-    buffer = [0x00]*26
-    buffer[1] = 1
+    buffer = [0x00]*25
+    buffer[0] = 1
     for i in range(0,14):
-        buffer[2+i]=dta[i]
+        buffer[1+i]=dta[i]
     
-    print (buffer);
-    hid.set_raw_data(buffer)
-    hid.send()
+#    print (bytearray(buffer));
+    hid.write(bytearray(buffer))
 
   # Send string to display
 def bootload(hid):
 
-    buffer = [0x00]*26
-    buffer[1]=0xFE
-    buffer[2]=0xED
-    buffer[3]=0xC0
-    buffer[4]=0xDE
+    buffer = [0x00]*25
+    buffer[0]=0xFE
+    buffer[1]=0xED
+    buffer[2]=0xC0
+    buffer[3]=0xDE
 
     hid.set_raw_data(buffer)
     hid.send()
@@ -53,9 +55,9 @@ def bootload(hid):
 def clearled(hid):
   # Send string to display
 
-    buffer = [0x00]*26
-    buffer[1]=0xCD
-    buffer[2]=0x01
+    buffer = [0x00]*25
+    buffer[0]=0xCD
+    buffer[1]=0x01
 
     hid.set_raw_data(buffer)
     hid.send()
@@ -63,9 +65,9 @@ def clearled(hid):
 def testled(hid):
   # Send string to display
 
-    buffer = [0x00]*26
-    buffer[1]=0xCD
-    buffer[2]=0x02
+    buffer = [0x00]*25
+    buffer[0]=0xCD
+    buffer[1]=0x02
 
     hid.set_raw_data(buffer)
     hid.send()
@@ -96,7 +98,7 @@ def format_dig(value, length, decimal):
       str = "{:03d}".format(value)[3::-1]
     
     digits=list(map(int, str))
-    print (digits)
+ #   print (digits)
     pos=0
     while dec>0:
       if dec&0x01:
@@ -112,6 +114,22 @@ def set_digits(hid, diga, digb, digc, digd):
     digits.extend(format_dig(digc, 3,1))
     digits.extend(format_dig(digd, 3,1))
     print_string(hid, digits)
+
+def set_ip(hid, diga, digb, digc, digd):
+    digits=[]
+    digits.extend(format_dig(diga, 4,0))
+    digits.extend(format_dig(digb, 4,0))
+    digits.extend(format_dig(digc, 3,0))
+    digits.extend(format_dig(digd, 3,0))
+
+#    print(digits)
+    digits[3]=0x0F
+    digits[7]=0x0F
+    digits[4]=digits[4]|0x80
+    digits[8]=digits[8]|0x80
+    digits[11]=digits[11]|0x80
+    print_string(hid, digits)
+
 
     
 def sample_handler(data):
@@ -130,13 +148,20 @@ def on_message(client, userdata, msg):
     global gBaro
     global gVhus
     global gUte 
-    print(msg.topic+" "+str(msg.payload))
+#    print(msg.topic+" "+str(msg.payload))
     if msg.topic == "sensors/nodehub/ps/baro":
        gBaro=float(msg.payload)
     if msg.topic == "sensors/maren1/Land/Temperature":
        gVhus=float(msg.payload)
     if msg.topic == "sensors/maren1/Sensor0/Temperature":
        gUte=float(msg.payload)
+
+def get_ip_address(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR
+        struct.pack('256s', bytes(ifname[:15], 'utf-8')))[20:24])
 
 
 def raw_test(argv, client):
@@ -170,57 +195,71 @@ def raw_test(argv, client):
     # browse devices...
     try:
         while (run and retry>0):
-            hid.HidDeviceFilter(vendor_id = 0x03EB)
-            all_hids = hid.HidDeviceFilter(vendor_id=0x03EB, product_id = 0x204F).get_devices()
-            
-            print(all_hids)
-            if all_hids:
-                device = all_hids[0]
+            en = hid.Enumeration()
+            vid = 0x03EB
+            pid = 0x204F
+            print("Open")
+            devices=en.find(vid=vid, pid=pid)
+            en.show()
+#            print(f'Device manufacturer: {device.manufacturer}')
+#            print(f'Product: {device.product}')
+#            print(f'Serial Number: {device.serial}')
+#            print(device)
+
+            if devices:
+                device = devices[0]
             try:
                 device.open()
 
 
                 #set custom raw data handler
-                device.set_raw_data_handler(sample_handler)
+#                device.set_raw_data_handler(sample_handler)
             
-                report = device.find_output_reports()
+#                report = device.find_output_reports()
 
-                print(report)
-                print(report[0])
+#                print(report)
+#                print(report[0])
 
                 if cmd==1:
-                    bootload(report[0])
+                    bootload(device)
                 elif cmd==2:
-                    testled(report[0])
+                    testled(device)
                 elif cmd==3:
-                    clearled(report[0])
+                    clearled(device)
 
-                sleep(1)
+                try:
+                  intip = list(map(int, get_ip_address('eth0').split('.')))
+                  set_ip(device, intip[3], intip[2], intip[1], intip[0])
+                except Exception as e:
+                    print("Print IP", e)
+                    traceback.print_exc()
+                    pass
+                sleep(5)
                 x=0
         # Go!       
                 print("\nWaiting for data...\nPress any (system keyboard) key to stop...")
-                while device.is_plugged():
+                while 1:
                     client.loop()
                     ltime=datetime.datetime.now().timetuple()
                     ctime=ltime.tm_hour+(ltime.tm_min/100.0)
-                    print(ctime)
+#                    print(ctime)
                     #just keep the device opened to receive events
                     
                     sleep(0.01)
                     if dtime!=ltime.tm_sec:
                         dtime=ltime.tm_sec
-                        set_digits(report[0], ctime, gBaro, gUte, gVhus)
+                        set_digits(device, ctime, gBaro, gUte, gVhus)
                         sleep(0.5)
         # TOPICS
         ###         print_string(report[0],str(datetime.datetime.now().time()),0)
                     sleep(0.01)
-                    if kbhit():
-                        run=False
+#                    if kbhit():
+#                        run=False
         #           print_string(report[0],"GB.UK",2)
         #           sleep(0.01)
 
             except Exception as e:
-                print("USB Disconnect")
+                print("USB Disconnect", e)
                 try:
                     device.close()
                 except Exception as e:
@@ -262,6 +301,8 @@ if __name__ == '__main__':
     client.on_message = on_message
 
     client.connect("extra.hoj.nu", 1883, 60)
+
+
 
     raw_test(sys.argv[1:],client)
 
